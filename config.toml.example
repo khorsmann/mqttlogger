@@ -1,0 +1,10 @@
+[broker]
+host = "tcp://localhost:1883"
+username = "DEIN_USERNAME"
+password = "DEIN_PASSWORT"
+topic = "tasmota/discovery/D48AFC2E6BD4/sensors"
+client_id = "go-mqtt-sqlite"
+
+[database]
+path = "./sensors.db"
+
