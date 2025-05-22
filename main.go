@@ -7,8 +7,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/BurntSushi/toml"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -16,8 +16,8 @@ import (
 )
 
 type Config struct {
-	Broker   BrokerConfig `toml:"broker"`
-	Database string       `toml:"database"`
+	Broker   BrokerConfig   `toml:"broker"`
+	Database DatabaseConfig `toml:"database"`
 }
 
 type BrokerConfig struct {
@@ -29,8 +29,11 @@ type BrokerConfig struct {
 	Qos      byte   `toml:"qos"`
 }
 
+type DatabaseConfig struct {
+	Path string `toml:"path"`
+}
+
 type EnergyData struct {
-	Time        string  `json:"Time"`
 	E_in        float64 `json:"E_in"`
 	E_out       float64 `json:"E_out"`
 	Power       int     `json:"Power"`
@@ -38,11 +41,8 @@ type EnergyData struct {
 }
 
 type SensorMessage struct {
-	Sn struct {
-		Time string     `json:"Time"`
-		E320 EnergyData `json:"E320"`
-	} `json:"sn"`
-	Ver int `json:"ver"`
+	Time string     `json:"Time"`
+	E320 EnergyData `json:"E320"`
 }
 
 func main() {
@@ -52,26 +52,30 @@ func main() {
 		log.Fatalf("Fehler beim Laden der Config: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", config.Database)
+	dbPath, _ := filepath.Abs(config.Database.Path)
+	log.Printf("Datenbank-Dateipfad (absolut): %s", dbPath)
+
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("Fehler beim Öffnen der Datenbank: %v", err)
 	}
 	defer db.Close()
 
 	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS energy_data (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			timestamp TEXT,
-			e_in REAL,
-			e_out REAL,
-			power INTEGER,
-			meter_number TEXT,
-			json TEXT
-		)
-	`)
+        CREATE TABLE IF NOT EXISTS energy_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            e_in REAL,
+            e_out REAL,
+            power INTEGER,
+            meter_number TEXT,
+            json TEXT
+        )
+    `)
 	if err != nil {
 		log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
 	}
+	log.Println("Tabelle 'energy_data' ist bereit.")
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
@@ -82,7 +86,7 @@ func main() {
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("Fehler beim Verbinden mit MQTT-Broker: %v", token.Error())
 	}
-	log.Println("Verbunden mit Broker")
+	log.Println("Verbunden mit MQTT-Broker.")
 
 	messageHandler := func(client mqtt.Client, msg mqtt.Message) {
 		var sensorMsg SensorMessage
@@ -92,14 +96,19 @@ func main() {
 			return
 		}
 
-		ed := sensorMsg.Sn.E320
-		timestamp := sensorMsg.Sn.Time
-		fmt.Printf("sn.E320.Meter_Number = %s\n", ed.MeterNumber)
-		fmt.Printf("sn.E320.E_in = %.3f\n", ed.E_in)
-		fmt.Printf("sn.E320.E_out = %.3f\n", ed.E_out)
-		fmt.Printf("sn.E320.Power = %d\n", ed.Power)
-		fmt.Printf("sn.Time = %s\n", timestamp)
-		fmt.Printf("ver = %d\n", sensorMsg.Ver)
+		if sensorMsg.E320.MeterNumber == "" {
+			log.Printf("Ignoriere Nachricht ohne E320-Daten: %s", string(msg.Payload()))
+			return
+		}
+
+		ed := sensorMsg.E320
+		timestamp := sensorMsg.Time
+
+		fmt.Printf("E320.Meter_Number = %s\n", ed.MeterNumber)
+		fmt.Printf("E320.E_in = %.3f\n", ed.E_in)
+		fmt.Printf("E320.E_out = %.3f\n", ed.E_out)
+		fmt.Printf("E320.Power = %d\n", ed.Power)
+		fmt.Printf("Time = %s\n", timestamp)
 
 		stmt, err := db.Prepare("INSERT INTO energy_data (timestamp, e_in, e_out, power, meter_number, json) VALUES (?, ?, ?, ?, ?, ?)")
 		if err != nil {
@@ -121,6 +130,7 @@ func main() {
 	if token.Wait() && token.Error() != nil {
 		log.Fatalf("Fehler beim Subscribe: %v", token.Error())
 	}
+	log.Printf("Abonniert auf Topic: %s", config.Broker.Topic)
 
 	log.Println("Läuft... (Strg+C zum Beenden)")
 	c := make(chan os.Signal, 1)
@@ -128,5 +138,5 @@ func main() {
 	<-c
 
 	client.Disconnect(250)
-	log.Println("Beendet")
+	log.Println("Beendet.")
 }

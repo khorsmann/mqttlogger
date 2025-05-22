@@ -2,10 +2,9 @@
 host = "tcp://localhost:1883"
 username = "DEIN_USERNAME"
 password = "DEIN_PASSWORT"
-topic = "tasmota/WattWaechter_DEINWERT/#"
+topic = "tasmota/WattWaechter_DEINWERT/SENSOR"
 qos = 1
 client_id = "go-mqtt-sqlite"
 
 [database]
-path = "./sensors.db"
-
+path = "./energy.db"
