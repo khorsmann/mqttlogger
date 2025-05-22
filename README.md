@@ -29,4 +29,28 @@ qos = 1
 path = "path/to/database.db"
 ```
 
+# systemd service
+
+Copy the template to your config folder like this:
+
+```bash
+cp mqttlogger.service ~/.config/systemd/user/mqttlogger.service
+```
+
+Change the values to your needs and enable/start it.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable mqttlogger.service
+systemctl --user start mqttlogger.service
+# logging
+journalctl --user -t mqttlogger-linux-arm64 -f
+```
+
+# Set german timezone on tasmota firmware
+
+Go to Tools > Console and enter:
+```bash
+Timezone 99
+```
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=MQTT Logger Service
+
+[Service]
+ExecStart=/home/pi/git/mqttlogger/build/mqttlogger-linux-arm64
+WorkingDirectory=/home/pi/git/mqttlogger
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
