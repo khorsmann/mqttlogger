@@ -15,8 +15,13 @@ The application is designed to run indefinitely while listening for MQTT message
 # Configuration
 
 The application requires a config.toml file for its configuration. Here's a sample configuration structure:
+The timezone is the current time your sensor used.
 
 ```bash
+[time]
+timezone = "Europe/Berlin"
+input_format = "2006-01-02T15:04:05"
+
 [broker]
 host = "tcp://mqtt.example.com:1883"
 username = "your_username"

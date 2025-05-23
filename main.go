@@ -3,8 +3,8 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
+
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,13 +16,20 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type TimeConfig struct {
+	Timezone    string `toml:"timezone"`
+	InputFormat string `toml:"input_format"`
+}
+
 type Config struct {
 	Broker   BrokerConfig   `toml:"broker"`
 	Database DatabaseConfig `toml:"database"`
+	Time     TimeConfig     `toml:"time"`
 }
 
 type BrokerConfig struct {
-	Host     string `toml:"host"`
+	Host string `toml:"host"`
+
 	Username string `toml:"username"`
 	Password string `toml:"password"`
 	ClientID string `toml:"client_id"`
@@ -42,7 +49,8 @@ type EnergyData struct {
 }
 
 type SensorMessage struct {
-	Time string     `json:"Time"`
+	Time string `json:"Time"`
+
 	E320 EnergyData `json:"E320"`
 }
 
@@ -63,21 +71,22 @@ func main() {
 	defer db.Close()
 
 	_, err = db.Exec(`
-				CREATE TABLE IF NOT EXISTS energy_data (
-    				id INTEGER PRIMARY KEY AUTOINCREMENT,
-    				timestamp TEXT,
-    				timestamp_unix INTEGER,
-    				timestamp_rfc3339 TEXT,
-    				e_in REAL,
-    				e_out REAL,
-    				power INTEGER,
-    				meter_number TEXT,
-    				json TEXT
-				)
+        CREATE TABLE IF NOT EXISTS energy_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            e_in REAL,
+            e_out REAL,
+            power INTEGER,
+            meter_number TEXT,
+            json TEXT,
+            timestamp_unix INTEGER,
+            timestamp_rfc3339 TEXT
+        )
     `)
 	if err != nil {
 		log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
 	}
+
 	log.Println("Tabelle 'energy_data' ist bereit.")
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
@@ -105,40 +114,43 @@ func main() {
 		}
 
 		ed := sensorMsg.E320
-		timestamp := sensorMsg.Time
-		parsedTime, err := time.Parse("2006-01-02T15:04:05", timestamp)
+		timestampStr := sensorMsg.Time
 
+		loc, err := time.LoadLocation(config.Time.Timezone)
 		if err != nil {
-			log.Printf("Zeitformat konnte nicht geparst werden: %v", err)
+			log.Printf("Fehler beim Laden der Zeitzone: %v", err)
 			return
 		}
-		parsedTime = parsedTime.UTC()
-		timestampUnix := parsedTime.Unix()
-		timestampRFC3339 := parsedTime.Format(time.RFC3339)
 
-		fmt.Printf("E320.Meter_Number = %s\n", ed.MeterNumber)
-		fmt.Printf("E320.E_in = %.3f\n", ed.E_in)
-		fmt.Printf("E320.E_out = %.3f\n", ed.E_out)
-		fmt.Printf("E320.Power = %d\n", ed.Power)
-		fmt.Printf("Time = %s\n", timestamp)
+		localTime, err := time.ParseInLocation(config.Time.InputFormat, timestampStr, loc)
+		if err != nil {
+			log.Printf("Fehler beim Parsen der Zeit: %v", err)
+			return
+		}
 
-		stmt, err := db.Prepare("INSERT INTO energy_data (timestamp, timestamp_unix, timestamp_rfc3339, e_in, e_out, power, meter_number, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+		utcTime := localTime.UTC()
+		unixTime := utcTime.Unix()
+		rfc3339Time := localTime.Format(time.RFC3339)
+
+		stmt, err := db.Prepare(`
+            INSERT INTO energy_data (timestamp, e_in, e_out, power, meter_number, json, timestamp_unix, timestamp_rfc3339)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+
+        `)
 		if err != nil {
 			log.Printf("Fehler beim Prepare: %v", err)
 			return
 		}
 		defer stmt.Close()
 
-		_, err = stmt.Exec(
-			timestamp, timestampUnix, timestampRFC3339,
-			ed.E_in, ed.E_out, ed.Power, ed.MeterNumber, string(msg.Payload()),
-		)
+		_, err = stmt.Exec(timestampStr, ed.E_in, ed.E_out, ed.Power, ed.MeterNumber, string(msg.Payload()), unixTime, rfc3339Time)
 		if err != nil {
 			log.Printf("Fehler beim Exec: %v", err)
+
 			return
 		}
 
-		log.Printf("Gespeichert: %s - %.2f kWh - %d W\n", timestamp, ed.E_in, ed.Power)
+		log.Printf("Gespeichert: %s - %.2f kWh - %d W (RFC3339: %s, UNIX: %d)\n", timestampStr, ed.E_in, ed.Power, rfc3339Time, unixTime)
 	}
 
 	token := client.Subscribe(config.Broker.Topic, config.Broker.Qos, messageHandler)

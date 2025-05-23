@@ -1,3 +1,7 @@
+[time]
+timezone = "Europe/Berlin"
+input_format = "2006-01-02T15:04:05"
+
 [broker]
 host = "tcp://localhost:1883"
 username = "DEIN_USERNAME"
