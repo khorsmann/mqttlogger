@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -62,15 +63,17 @@ func main() {
 	defer db.Close()
 
 	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS energy_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            e_in REAL,
-            e_out REAL,
-            power INTEGER,
-            meter_number TEXT,
-            json TEXT
-        )
+				CREATE TABLE IF NOT EXISTS energy_data (
+    				id INTEGER PRIMARY KEY AUTOINCREMENT,
+    				timestamp TEXT,
+    				timestamp_unix INTEGER,
+    				timestamp_rfc3339 TEXT,
+    				e_in REAL,
+    				e_out REAL,
+    				power INTEGER,
+    				meter_number TEXT,
+    				json TEXT
+				)
     `)
 	if err != nil {
 		log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
@@ -103,6 +106,15 @@ func main() {
 
 		ed := sensorMsg.E320
 		timestamp := sensorMsg.Time
+		parsedTime, err := time.Parse("2006-01-02T15:04:05", timestamp)
+
+		if err != nil {
+			log.Printf("Zeitformat konnte nicht geparst werden: %v", err)
+			return
+		}
+		parsedTime = parsedTime.UTC()
+		timestampUnix := parsedTime.Unix()
+		timestampRFC3339 := parsedTime.Format(time.RFC3339)
 
 		fmt.Printf("E320.Meter_Number = %s\n", ed.MeterNumber)
 		fmt.Printf("E320.E_in = %.3f\n", ed.E_in)
@@ -110,14 +122,17 @@ func main() {
 		fmt.Printf("E320.Power = %d\n", ed.Power)
 		fmt.Printf("Time = %s\n", timestamp)
 
-		stmt, err := db.Prepare("INSERT INTO energy_data (timestamp, e_in, e_out, power, meter_number, json) VALUES (?, ?, ?, ?, ?, ?)")
+		stmt, err := db.Prepare("INSERT INTO energy_data (timestamp, timestamp_unix, timestamp_rfc3339, e_in, e_out, power, meter_number, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 		if err != nil {
 			log.Printf("Fehler beim Prepare: %v", err)
 			return
 		}
 		defer stmt.Close()
 
-		_, err = stmt.Exec(timestamp, ed.E_in, ed.E_out, ed.Power, ed.MeterNumber, string(msg.Payload()))
+		_, err = stmt.Exec(
+			timestamp, timestampUnix, timestampRFC3339,
+			ed.E_in, ed.E_out, ed.Power, ed.MeterNumber, string(msg.Payload()),
+		)
 		if err != nil {
 			log.Printf("Fehler beim Exec: %v", err)
 			return
