@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
-
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,8 +27,7 @@ type Config struct {
 }
 
 type BrokerConfig struct {
-	Host string `toml:"host"`
-
+	Host     string `toml:"host"`
 	Username string `toml:"username"`
 	Password string `toml:"password"`
 	ClientID string `toml:"client_id"`
@@ -49,8 +47,7 @@ type EnergyData struct {
 }
 
 type SensorMessage struct {
-	Time string `json:"Time"`
-
+	Time string     `json:"Time"`
 	E320 EnergyData `json:"E320"`
 }
 
@@ -62,7 +59,7 @@ func main() {
 	}
 
 	dbPath, _ := filepath.Abs(config.Database.Path)
-	log.Printf("Datenbank-Dateipfad (absolut): %s", dbPath)
+	log.Printf("Datenbank-Dateipfad: %s", dbPath)
 
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -73,21 +70,16 @@ func main() {
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS energy_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
+            timestamp_unix INTEGER,
+            timestamp_rfc3339 TEXT,
             e_in REAL,
             e_out REAL,
-            power INTEGER,
-            meter_number TEXT,
-            json TEXT,
-            timestamp_unix INTEGER,
-            timestamp_rfc3339 TEXT
+            power INTEGER
         )
     `)
 	if err != nil {
 		log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
 	}
-
-	log.Println("Tabelle 'energy_data' ist bereit.")
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
@@ -96,7 +88,7 @@ func main() {
 
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("Fehler beim Verbinden mit MQTT-Broker: %v", token.Error())
+		log.Fatalf("Fehler beim MQTT-Connect: %v", token.Error())
 	}
 	log.Println("Verbunden mit MQTT-Broker.")
 
@@ -105,11 +97,6 @@ func main() {
 		err := json.Unmarshal(msg.Payload(), &sensorMsg)
 		if err != nil {
 			log.Printf("Fehler beim JSON-Unmarshal: %v", err)
-			return
-		}
-
-		if sensorMsg.E320.MeterNumber == "" {
-			log.Printf("Ignoriere Nachricht ohne E320-Daten: %s", string(msg.Payload()))
 			return
 		}
 
@@ -133,9 +120,8 @@ func main() {
 		rfc3339Time := localTime.Format(time.RFC3339)
 
 		stmt, err := db.Prepare(`
-            INSERT INTO energy_data (timestamp, e_in, e_out, power, meter_number, json, timestamp_unix, timestamp_rfc3339)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-
+            INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power)
+            VALUES (?, ?, ?, ?, ?)
         `)
 		if err != nil {
 			log.Printf("Fehler beim Prepare: %v", err)
@@ -143,18 +129,16 @@ func main() {
 		}
 		defer stmt.Close()
 
-		_, err = stmt.Exec(timestampStr, ed.E_in, ed.E_out, ed.Power, ed.MeterNumber, string(msg.Payload()), unixTime, rfc3339Time)
+		_, err = stmt.Exec(unixTime, rfc3339Time, ed.E_in, ed.E_out, ed.Power)
 		if err != nil {
 			log.Printf("Fehler beim Exec: %v", err)
-
 			return
 		}
 
-		log.Printf("Gespeichert: %s - %.2f kWh - %d W (RFC3339: %s, UNIX: %d)\n", timestampStr, ed.E_in, ed.Power, rfc3339Time, unixTime)
+		log.Printf("Gespeichert: %.2f kWh, %d W @ %s (%d)", ed.E_in, ed.Power, rfc3339Time, unixTime)
 	}
 
-	token := client.Subscribe(config.Broker.Topic, config.Broker.Qos, messageHandler)
-	if token.Wait() && token.Error() != nil {
+	if token := client.Subscribe(config.Broker.Topic, config.Broker.Qos, messageHandler); token.Wait() && token.Error() != nil {
 		log.Fatalf("Fehler beim Subscribe: %v", token.Error())
 	}
 	log.Printf("Abonniert auf Topic: %s", config.Broker.Topic)
