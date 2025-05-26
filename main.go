@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -101,6 +102,7 @@ func main() {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS tasmota_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT,
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
 			power INTEGER
@@ -162,13 +164,19 @@ func main() {
 					log.Printf("Fehler beim Parsen Tasmota: %v", err)
 					return
 				}
-				stmt, _ := db.Prepare(`INSERT INTO tasmota_data (timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?)`)
+				// device_id extrahieren z. B. aus "tele/tasmota_17A11C/SENSOR"
+				segments := strings.Split(topic, "/")
+				deviceID := ""
+				if len(segments) >= 2 {
+					deviceID = segments[1] // z.B. "tasmota_17A11C"
+				}
+				stmt, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
 				defer stmt.Close()
-				_, err = stmt.Exec(unixTime, rfc3339Time, tm.ENERGY.Power)
+				_, err = stmt.Exec(deviceID, unixTime, rfc3339Time, tm.ENERGY.Power)
 				if err != nil {
 					log.Printf("Fehler DB Tasmota: %v", err)
 				}
-				log.Printf("Tasmota: %d W @ %s", tm.ENERGY.Power, rfc3339Time)
+				log.Printf("Tasmota: %s %d W @ %s", deviceID, tm.ENERGY.Power, rfc3339Time)
 			}
 		}
 	}
