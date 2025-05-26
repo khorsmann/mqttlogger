@@ -6,9 +6,16 @@ input_format = "2006-01-02T15:04:05"
 host = "tcp://localhost:1883"
 username = "DEIN_USERNAME"
 password = "DEIN_PASSWORT"
-topic = "tasmota/WattWaechter_DEINWERT/SENSOR"
 qos = 1
 client_id = "go-mqtt-sqlite"
 
 [database]
 path = "./energy.db"
+
+[topics]
+wattwaechter = "tele/WattWaechter_SENSORID/SENSOR"
+tasmota = "tele/tasmota_SENSORID/SENSOR"
+
+[features]
+tasmota_power_enabled = true
+

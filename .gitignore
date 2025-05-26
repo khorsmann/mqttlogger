@@ -1,3 +1,4 @@
+misc/*
 build/*
 *.db
 config.toml

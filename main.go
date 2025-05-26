@@ -24,6 +24,8 @@ type Config struct {
 	Broker   BrokerConfig   `toml:"broker"`
 	Database DatabaseConfig `toml:"database"`
 	Time     TimeConfig     `toml:"time"`
+	Topics   TopicsConfig   `toml:"topics"`
+	Features FeatureFlags   `toml:"features"`
 }
 
 type BrokerConfig struct {
@@ -31,12 +33,20 @@ type BrokerConfig struct {
 	Username string `toml:"username"`
 	Password string `toml:"password"`
 	ClientID string `toml:"client_id"`
-	Topic    string `toml:"topic"`
 	Qos      byte   `toml:"qos"`
+}
+
+type TopicsConfig struct {
+	Wattwaechter string `toml:"wattwaechter"`
+	Tasmota      string `toml:"tasmota"`
 }
 
 type DatabaseConfig struct {
 	Path string `toml:"path"`
+}
+
+type FeatureFlags struct {
+	TasmotaPowerEnabled bool `toml:"tasmota_power_enabled"`
 }
 
 type EnergyData struct {
@@ -51,6 +61,15 @@ type SensorMessage struct {
 	E320 EnergyData `json:"E320"`
 }
 
+type TasmotaENERGY struct {
+	Power int `json:"Power"`
+}
+
+type TasmotaMessage struct {
+	Time   string        `json:"Time"`
+	ENERGY TasmotaENERGY `json:"ENERGY"`
+}
+
 func main() {
 	var config Config
 	_, err := toml.DecodeFile("config.toml", &config)
@@ -60,7 +79,6 @@ func main() {
 
 	dbPath, _ := filepath.Abs(config.Database.Path)
 	log.Printf("Datenbank-Dateipfad: %s", dbPath)
-
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("Fehler beim Öffnen der Datenbank: %v", err)
@@ -68,17 +86,27 @@ func main() {
 	defer db.Close()
 
 	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS energy_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_unix INTEGER,
-            timestamp_rfc3339 TEXT,
-            e_in REAL,
-            e_out REAL,
-            power INTEGER
-        )
-    `)
+		CREATE TABLE IF NOT EXISTS energy_data (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp_unix INTEGER,
+			timestamp_rfc3339 TEXT,
+			e_in REAL,
+			e_out REAL,
+			power INTEGER
+		)`)
 	if err != nil {
-		log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
+		log.Fatalf("Fehler beim Erstellen der Tabelle energy_data: %v", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS tasmota_data (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp_unix INTEGER,
+			timestamp_rfc3339 TEXT,
+			power INTEGER
+		)`)
+	if err != nil {
+		log.Fatalf("Fehler beim Erstellen der Tabelle tasmota_data: %v", err)
 	}
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
@@ -92,56 +120,66 @@ func main() {
 	}
 	log.Println("Verbunden mit MQTT-Broker.")
 
-	messageHandler := func(client mqtt.Client, msg mqtt.Message) {
-		var sensorMsg SensorMessage
-		err := json.Unmarshal(msg.Payload(), &sensorMsg)
+	handleMessage := func(client mqtt.Client, msg mqtt.Message) {
+		var base map[string]interface{}
+		err := json.Unmarshal(msg.Payload(), &base)
 		if err != nil {
-			log.Printf("Fehler beim JSON-Unmarshal: %v", err)
+			log.Printf("Ungültiges JSON: %v", err)
 			return
 		}
 
-		ed := sensorMsg.E320
-		timestampStr := sensorMsg.Time
-
-		loc, err := time.LoadLocation(config.Time.Timezone)
-		if err != nil {
-			log.Printf("Fehler beim Laden der Zeitzone: %v", err)
-			return
-		}
-
+		topic := msg.Topic()
+		timestampStr := base["Time"].(string)
+		loc, _ := time.LoadLocation(config.Time.Timezone)
 		localTime, err := time.ParseInLocation(config.Time.InputFormat, timestampStr, loc)
 		if err != nil {
-			log.Printf("Fehler beim Parsen der Zeit: %v", err)
+			log.Printf("Zeitfehler: %v", err)
 			return
 		}
-
 		utcTime := localTime.UTC()
-		unixTime := utcTime.Unix()
 		rfc3339Time := localTime.Format(time.RFC3339)
+		unixTime := utcTime.Unix()
 
-		stmt, err := db.Prepare(`
-            INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power)
-            VALUES (?, ?, ?, ?, ?)
-        `)
-		if err != nil {
-			log.Printf("Fehler beim Prepare: %v", err)
-			return
+		switch topic {
+		case config.Topics.Wattwaechter:
+			var sm SensorMessage
+			if err := json.Unmarshal(msg.Payload(), &sm); err != nil {
+				log.Printf("Fehler beim Parsen Wattwächter: %v", err)
+				return
+			}
+			stmt, _ := db.Prepare(`INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power) VALUES (?, ?, ?, ?, ?)`)
+			defer stmt.Close()
+			_, err = stmt.Exec(unixTime, rfc3339Time, sm.E320.E_in, sm.E320.E_out, sm.E320.Power)
+			if err != nil {
+				log.Printf("Fehler DB Wattwächter: %v", err)
+			}
+			log.Printf("Wattwächter: %d W @ %s", sm.E320.Power, rfc3339Time)
+
+		case config.Topics.Tasmota:
+			if config.Features.TasmotaPowerEnabled {
+				var tm TasmotaMessage
+				if err := json.Unmarshal(msg.Payload(), &tm); err != nil {
+					log.Printf("Fehler beim Parsen Tasmota: %v", err)
+					return
+				}
+				stmt, _ := db.Prepare(`INSERT INTO tasmota_data (timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?)`)
+				defer stmt.Close()
+				_, err = stmt.Exec(unixTime, rfc3339Time, tm.ENERGY.Power)
+				if err != nil {
+					log.Printf("Fehler DB Tasmota: %v", err)
+				}
+				log.Printf("Tasmota: %d W @ %s", tm.ENERGY.Power, rfc3339Time)
+			}
 		}
-		defer stmt.Close()
-
-		_, err = stmt.Exec(unixTime, rfc3339Time, ed.E_in, ed.E_out, ed.Power)
-		if err != nil {
-			log.Printf("Fehler beim Exec: %v", err)
-			return
-		}
-
-		log.Printf("Gespeichert: %.2f kWh, %d W @ %s (%d)", ed.E_in, ed.Power, rfc3339Time, unixTime)
 	}
 
-	if token := client.Subscribe(config.Broker.Topic, config.Broker.Qos, messageHandler); token.Wait() && token.Error() != nil {
-		log.Fatalf("Fehler beim Subscribe: %v", token.Error())
+	client.Subscribe(config.Topics.Wattwaechter, config.Broker.Qos, handleMessage)
+	log.Printf("Abonniert auf Topic: %s", config.Topics.Wattwaechter)
+
+	if config.Features.TasmotaPowerEnabled {
+		client.Subscribe(config.Topics.Tasmota, config.Broker.Qos, handleMessage)
+		log.Printf("Abonniert auf Topic: %s", config.Topics.Tasmota)
 	}
-	log.Printf("Abonniert auf Topic: %s", config.Broker.Topic)
 
 	log.Println("Läuft... (Strg+C zum Beenden)")
 	c := make(chan os.Signal, 1)
