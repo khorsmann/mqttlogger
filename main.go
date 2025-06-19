@@ -89,9 +89,12 @@ func main() {
 	}
 	defer db.Close()
 
+	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
+
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS energy_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
 			e_in REAL,
@@ -128,20 +131,31 @@ func main() {
 		log.Fatalf("Fehler beim Erstellen der Tabelle solar_data: %v", err)
 	}
 
+	stmtWatt, _ := db.Prepare(`INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power) VALUES (?, ?, ?, ?, ?)`)
+	defer stmtWatt.Close()
+	stmtTasmota, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
+	defer stmtTasmota.Close()
+
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
 	opts.SetPassword(config.Broker.Password)
+
 	opts.SetClientID(config.Broker.ClientID)
+	opts.OnConnectionLost = func(c mqtt.Client, err error) {
+		log.Printf("Verbindung verloren: %v", err)
+	}
+	opts.OnConnect = func(c mqtt.Client) {
+		log.Println("Erneut mit MQTT-Broker verbunden.")
+	}
 
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
-
 		log.Fatalf("Fehler beim MQTT-Connect: %v", token.Error())
+
 	}
 	log.Println("Verbunden mit MQTT-Broker.")
 
 	handleMessage := func(client mqtt.Client, msg mqtt.Message) {
-
 		topic := msg.Topic()
 
 		if strings.HasPrefix(topic, "solar/") && config.Features.SolarEnabled {
@@ -156,7 +170,12 @@ func main() {
 			return
 		}
 
-		timestampStr := base["Time"].(string)
+		timestampStr, ok := base["Time"].(string)
+		if !ok {
+			log.Printf("Zeitfeld fehlt oder ist ungültig im JSON: %v", base)
+			return
+
+		}
 		loc, _ := time.LoadLocation(config.Time.Timezone)
 		localTime, err := time.ParseInLocation(config.Time.InputFormat, timestampStr, loc)
 		if err != nil {
@@ -174,9 +193,7 @@ func main() {
 				log.Printf("Fehler beim Parsen Wattwächter: %v", err)
 				return
 			}
-			stmt, _ := db.Prepare(`INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power) VALUES (?, ?, ?, ?, ?)`)
-			defer stmt.Close()
-			_, err = stmt.Exec(unixTime, rfc3339Time, sm.E320.E_in, sm.E320.E_out, sm.E320.Power)
+			_, err = stmtWatt.Exec(unixTime, rfc3339Time, sm.E320.E_in, sm.E320.E_out, sm.E320.Power)
 			if err != nil {
 				log.Printf("Fehler DB Wattwächter: %v", err)
 			}
@@ -194,9 +211,7 @@ func main() {
 				if len(segments) >= 2 {
 					deviceID = segments[1]
 				}
-				stmt, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
-				defer stmt.Close()
-				_, err = stmt.Exec(deviceID, unixTime, rfc3339Time, tm.ENERGY.Power)
+				_, err = stmtTasmota.Exec(deviceID, unixTime, rfc3339Time, tm.ENERGY.Power)
 				if err != nil {
 					log.Printf("Fehler DB Tasmota: %v", err)
 				}
@@ -206,7 +221,6 @@ func main() {
 	}
 
 	client.Subscribe(config.Topics.Wattwaechter, config.Broker.Qos, handleMessage)
-
 	log.Printf("Abonniert auf Topic: %s", config.Topics.Wattwaechter)
 
 	if config.Features.TasmotaPowerEnabled {
@@ -225,6 +239,7 @@ func main() {
 	<-c
 
 	client.Disconnect(250)
+
 	log.Println("Beendet.")
 }
 
@@ -235,7 +250,7 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 	unixTime := now.UTC().Unix()
 
 	segments := strings.Split(topic, "/")
-	if len(segments) < 3 {
+	if len(segments) < 2 {
 		log.Printf("Ungültiges Solar-Topic: %s", topic)
 		return
 	}
@@ -251,10 +266,17 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 		metric = strings.Join(segments[2:], "/")
 	case "dtu":
 		return
+	case "today_energy_sum":
+		deviceID = "summary"
+		channel = -1
+		metric = "today_energy_sum"
 	default:
+		if len(segments) < 4 {
+			log.Printf("Ungültiges Solar-Topic: %s", topic)
+			return
+		}
 		deviceID = segments[1]
 		ch, err := strconv.Atoi(segments[2])
-
 		if err != nil {
 			log.Printf("Ungültiger Channel: %s", segments[2])
 			return
@@ -273,6 +295,7 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 	defer stmt.Close()
 	_, err = stmt.Exec(unixTime, rfc3339Time, deviceID, channel, metric, val)
 	if err != nil {
+
 		log.Printf("Fehler DB solar_data: %v", err)
 	}
 	log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
