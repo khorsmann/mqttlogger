@@ -18,9 +18,12 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type TimeConfig struct {
-	Timezone    string `toml:"timezone"`
-	InputFormat string `toml:"input_format"`
+type BrokerConfig struct {
+	Host     string `toml:"host"`
+	Username string `toml:"username"`
+	Password string `toml:"password"`
+	ClientID string `toml:"client_id"`
+	Qos      byte   `toml:"qos"`
 }
 
 type Config struct {
@@ -31,26 +34,8 @@ type Config struct {
 	Features FeatureFlags   `toml:"features"`
 }
 
-type BrokerConfig struct {
-	Host     string `toml:"host"`
-	Username string `toml:"username"`
-	Password string `toml:"password"`
-	ClientID string `toml:"client_id"`
-	Qos      byte   `toml:"qos"`
-}
-
-type TopicsConfig struct {
-	Wattwaechter string `toml:"wattwaechter"`
-	Tasmota      string `toml:"tasmota"`
-}
-
 type DatabaseConfig struct {
 	Path string `toml:"path"`
-}
-
-type FeatureFlags struct {
-	TasmotaPowerEnabled bool `toml:"tasmota_power_enabled"`
-	SolarEnabled        bool `toml:"solar_enabled"`
 }
 
 type EnergyData struct {
@@ -60,18 +45,35 @@ type EnergyData struct {
 	MeterNumber string  `json:"Meter_Number"`
 }
 
-type SensorMessage struct {
-	Time string     `json:"Time"`
-	E320 EnergyData `json:"E320"`
+type FeatureFlags struct {
+	TasmotaPowerEnabled bool `toml:"tasmota_power"`
+	SolarEnabled        bool `toml:"solar"`
 }
 
-type TasmotaENERGY struct {
-	Power int `json:"Power"`
+type TimeConfig struct {
+	Timezone    string `toml:"timezone"`
+	InputFormat string `toml:"input_format"`
+}
+
+type TopicsConfig struct {
+	Wattwaechter string `toml:"wattwaechter"`
+	Tasmota      string `toml:"tasmota"`
 }
 
 type TasmotaMessage struct {
-	Time   string        `json:"Time"`
-	ENERGY TasmotaENERGY `json:"ENERGY"`
+	Time   string `json:"Time"`
+	ENERGY struct {
+		Power int `json:"Power"`
+	} `json:"ENERGY"`
+}
+
+type SensorMessage struct {
+	Time string `json:"Time"`
+	E320 struct {
+		E_in  float64 `json:"E_in"`
+		E_out float64 `json:"E_out"`
+		Power int     `json:"Power"`
+	} `json:"E320"`
 }
 
 func main() {
@@ -94,7 +96,6 @@ func main() {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS energy_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
 			e_in REAL,
@@ -131,6 +132,19 @@ func main() {
 		log.Fatalf("Fehler beim Erstellen der Tabelle solar_data: %v", err)
 	}
 
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS solar_meta (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT,
+			channel INTEGER,
+			key TEXT,
+			value TEXT,
+			UNIQUE(device_id, channel, key)
+		)`)
+	if err != nil {
+		log.Fatalf("Fehler beim Erstellen der Tabelle solar_meta: %v", err)
+	}
+
 	stmtWatt, _ := db.Prepare(`INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power) VALUES (?, ?, ?, ?, ?)`)
 	defer stmtWatt.Close()
 	stmtTasmota, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
@@ -138,8 +152,8 @@ func main() {
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
-	opts.SetPassword(config.Broker.Password)
 
+	opts.SetPassword(config.Broker.Password)
 	opts.SetClientID(config.Broker.ClientID)
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
 		log.Printf("Verbindung verloren: %v", err)
@@ -151,7 +165,6 @@ func main() {
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("Fehler beim MQTT-Connect: %v", token.Error())
-
 	}
 	log.Println("Verbunden mit MQTT-Broker.")
 
@@ -174,7 +187,6 @@ func main() {
 		if !ok {
 			log.Printf("Zeitfeld fehlt oder ist ungültig im JSON: %v", base)
 			return
-
 		}
 		loc, _ := time.LoadLocation(config.Time.Timezone)
 		localTime, err := time.ParseInLocation(config.Time.InputFormat, timestampStr, loc)
@@ -194,6 +206,7 @@ func main() {
 				return
 			}
 			_, err = stmtWatt.Exec(unixTime, rfc3339Time, sm.E320.E_in, sm.E320.E_out, sm.E320.Power)
+
 			if err != nil {
 				log.Printf("Fehler DB Wattwächter: %v", err)
 			}
@@ -208,6 +221,7 @@ func main() {
 				}
 				segments := strings.Split(topic, "/")
 				deviceID := ""
+
 				if len(segments) >= 2 {
 					deviceID = segments[1]
 				}
@@ -239,7 +253,6 @@ func main() {
 	<-c
 
 	client.Disconnect(250)
-
 	log.Println("Beendet.")
 }
 
@@ -279,24 +292,39 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 		ch, err := strconv.Atoi(segments[2])
 		if err != nil {
 			log.Printf("Ungültiger Channel: %s", segments[2])
+
 			return
 		}
 		channel = ch
 		metric = strings.Join(segments[3:], "/")
 	}
 
-	val, err := strconv.ParseFloat(payload, 64)
-	if err != nil {
-		log.Printf("Fehler beim Parsen von Solarwert '%s': %v", payload, err)
+	// Versuche Wert als float
+	if val, err := strconv.ParseFloat(payload, 64); err == nil {
+		stmt, _ := db.Prepare(`INSERT INTO solar_data (timestamp_unix, timestamp_rfc3339, device_id, channel, metric, value) VALUES (?, ?, ?, ?, ?, ?)`)
+		defer stmt.Close()
+		_, err = stmt.Exec(unixTime, rfc3339Time, deviceID, channel, metric, val)
+		if err != nil {
+			log.Printf("Fehler DB solar_data: %v", err)
+
+		} else {
+			log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
+		}
 		return
 	}
 
-	stmt, _ := db.Prepare(`INSERT INTO solar_data (timestamp_unix, timestamp_rfc3339, device_id, channel, metric, value) VALUES (?, ?, ?, ?, ?, ?)`)
-	defer stmt.Close()
-	_, err = stmt.Exec(unixTime, rfc3339Time, deviceID, channel, metric, val)
-	if err != nil {
+	// Andernfalls Textwert → speichere in solar_meta
+	stmt, _ := db.Prepare(`
+		INSERT INTO solar_meta (device_id, channel, key, value)
+		VALUES (?, ?, ?, ?)
 
-		log.Printf("Fehler DB solar_data: %v", err)
+		ON CONFLICT(device_id, channel, key) DO UPDATE SET value = excluded.value
+	`)
+	defer stmt.Close()
+	_, err := stmt.Exec(deviceID, channel, metric, payload)
+	if err != nil {
+		log.Printf("Fehler DB solar_meta: %v", err)
+	} else {
+		log.Printf("Solar-Meta gespeichert: %s/%d/%s = %s", deviceID, channel, metric, payload)
 	}
-	log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
 }

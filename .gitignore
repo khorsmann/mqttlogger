@@ -1,4 +1,4 @@
 misc/*
 build/*
-*.db
+*.db*
 config.toml
