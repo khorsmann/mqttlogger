@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -74,6 +75,102 @@ type SensorMessage struct {
 		E_out float64 `json:"E_out"`
 		Power int     `json:"Power"`
 	} `json:"E320"`
+}
+
+func startDBAggregation(db *sql.DB, hour, minute int) {
+	// Automatischer Checkpoint ab ~1 MB WAL
+	_, _ = db.Exec("PRAGMA wal_autocheckpoint=1000;")
+
+	// Channel für manuelle Trigger (USR1)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGUSR1)
+
+	// Aggregationsfunktion
+	runAggregation := func() {
+		log.Println("Starte DB-Aggregation...")
+
+		aggregate := func(table string, valueColumn string, otherCols string) {
+			tmpTable := table + "_agg_tmp"
+			createTmp := fmt.Sprintf(`
+				CREATE TEMP TABLE %s AS
+				SELECT
+					CAST(strftime('%%s', strftime('%%Y-%%m-%%d %%H:00:00', timestamp_unix, 'unixepoch')) AS INTEGER) AS timestamp_unix,
+					strftime('%%Y-%%m-%%dT%%H:00:00', timestamp_unix, 'unixepoch') AS timestamp_rfc3339,
+					%s,
+					AVG(%s) AS %s
+				FROM %s
+				WHERE timestamp_unix < strftime('%%s', 'now', '-30 days')
+				GROUP BY %s, strftime('%%Y-%%m-%%d %%H', timestamp_unix, 'unixepoch');
+			`, tmpTable, otherCols, valueColumn, valueColumn, table, otherCols)
+
+			if _, err := db.Exec(createTmp); err != nil {
+				log.Printf("Fehler beim Erstellen temporärer Tabelle für %s: %v", table, err)
+				return
+			}
+
+			if _, err := db.Exec(
+				fmt.Sprintf(`DELETE FROM %s WHERE timestamp_unix < strftime('%%s', 'now', '-30 days')`, table),
+			); err != nil {
+				log.Printf("Fehler beim Löschen alter Daten in %s: %v", table, err)
+				return
+			}
+
+			insert := fmt.Sprintf(`
+
+				INSERT INTO %s (timestamp_unix, timestamp_rfc3339, %s, %s)
+				SELECT timestamp_unix, timestamp_rfc3339, %s, %s FROM %s
+			`, table, strings.ReplaceAll(otherCols, ",", ", "), valueColumn, otherCols, valueColumn, tmpTable)
+
+			if _, err := db.Exec(insert); err != nil {
+				log.Printf("Fehler beim Einfügen aggregierter Daten in %s: %v", table, err)
+				return
+			}
+
+			_, _ = db.Exec(fmt.Sprintf(`DROP TABLE %s`, tmpTable))
+			log.Printf("Aggregation in %s abgeschlossen", table)
+		}
+
+		// Tabellen aggregieren
+		aggregate("energy_data", "power", "e_in, e_out")
+		aggregate("tasmota_data", "power", "device_id")
+		aggregate("solar_data", "value", "device_id, channel, metric")
+
+		// WAL-Checkpoint
+		if _, err := db.Exec("PRAGMA wal_checkpoint(FULL);"); err != nil {
+
+			log.Printf("Fehler beim WAL-Checkpoint: %v", err)
+		} else {
+			log.Println("WAL-Checkpoint durchgeführt – WAL-Datei geleert")
+		}
+
+		// VACUUM
+		if _, err := db.Exec("VACUUM"); err != nil {
+			log.Printf("Fehler beim VACUUM: %v", err)
+		} else {
+			log.Println("VACUUM abgeschlossen – DB verschlankt")
+		}
+	}
+
+	// Nachtjob
+	go func() {
+		for {
+			now := time.Now()
+			nextRun := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+			if now.After(nextRun) {
+				nextRun = nextRun.Add(24 * time.Hour)
+			}
+			time.Sleep(time.Until(nextRun))
+			runAggregation()
+		}
+	}()
+
+	// Manueller Trigger per Signal
+	go func() {
+		for range sigChan {
+			log.Println("Signal USR1 empfangen – Aggregation wird gestartet...")
+			runAggregation()
+		}
+	}()
 }
 
 func main() {
@@ -149,6 +246,8 @@ func main() {
 	defer stmtWatt.Close()
 	stmtTasmota, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
 	defer stmtTasmota.Close()
+
+	startDBAggregation(db, 3, 0) // Täglich um 03:00 Uhr
 
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
