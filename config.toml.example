@@ -17,5 +17,8 @@ wattwaechter = "tele/WattWaechter_SENSORID/SENSOR"
 tasmota = "tele/tasmota_SENSORID/SENSOR"
 
 [features]
-tasmota_power_enabled = true
+tasmota_power = true
+solar = false
 
+[energy]
+price_per_kwh = 0.3127
