@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart mqttlogger service (user scope)
+[Service]
+Type=oneshot
+ExecStart=systemctl --user restart mqttlogger.service
+

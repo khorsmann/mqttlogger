@@ -40,6 +40,8 @@ Copy the template to your config folder like this:
 
 ```bash
 cp mqttlogger.service ~/.config/systemd/user/mqttlogger.service
+cp mqttlogger-restart.service ~/.config/systemd/user/mqttlogger-restart.service
+cp mqttlogger-restart.timer ~/.config/systemd/user/mqttlogger-restart.timer
 ```
 
 Change the values to your needs and enable/start it.
@@ -48,6 +50,7 @@ Change the values to your needs and enable/start it.
 systemctl --user daemon-reload
 systemctl --user enable mqttlogger.service
 systemctl --user start mqttlogger.service
+systemctl --user enable --now mqttlogger-restart.timer
 # logging
 journalctl --user -t mqttlogger-linux-arm64 -f
 ```

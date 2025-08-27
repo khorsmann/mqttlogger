@@ -1,0 +1,11 @@
+[Unit]
+Description=Restart mqttlogger service daily at 4:00
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 
+Persistent=true 
+Unit=mqttlogger-restart.service
+
+[Install]
+WantedBy=timers.target
+
