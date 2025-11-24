@@ -21,5 +21,5 @@ tasmota = "tele/tasmota_SENSORID/SENSOR"
 tasmota_power = true
 solar = false
 
-[energy]
-price_per_kwh = 0.3127
+[cost]
+per_kwh = 0.3127

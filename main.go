@@ -19,6 +19,8 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+// ---------------- Config ----------------
+
 type BrokerConfig struct {
 	Host     string `toml:"host"`
 	Username string `toml:"username"`
@@ -34,17 +36,15 @@ type Config struct {
 	Time     TimeConfig     `toml:"time"`
 	Topics   TopicsConfig   `toml:"topics"`
 	Features FeatureFlags   `toml:"features"`
+	Cost     CostConfig     `toml:"cost"`
 }
 
 type DatabaseConfig struct {
 	Path string `toml:"path"`
 }
 
-type EnergyData struct {
-	E_in        float64 `json:"E_in"`
-	E_out       float64 `json:"E_out"`
-	Power       int     `json:"Power"`
-	MeterNumber string  `json:"Meter_Number"`
+type CostConfig struct {
+	PerKWh float64 `toml:"per_kwh"`
 }
 
 type FeatureFlags struct {
@@ -60,6 +60,15 @@ type TimeConfig struct {
 type TopicsConfig struct {
 	Wattwaechter string `toml:"wattwaechter"`
 	Tasmota      string `toml:"tasmota"`
+}
+
+// ---------------- MQTT & Datenstrukturen ----------------
+
+type EnergyData struct {
+	E_in        float64 `json:"E_in"`
+	E_out       float64 `json:"E_out"`
+	Power       int     `json:"Power"`
+	MeterNumber string  `json:"Meter_Number"`
 }
 
 type TasmotaMessage struct {
@@ -78,15 +87,63 @@ type SensorMessage struct {
 	} `json:"E320"`
 }
 
-func startDBAggregation(db *sql.DB, hour, minute int) {
-	// Automatischer Checkpoint ab ~1 MB WAL
+// ---------------- Views erstellen ----------------
+
+func createViews(db *sql.DB, costPerKWh float64) error {
+	views := []string{
+		fmt.Sprintf(`
+			CREATE VIEW IF NOT EXISTS monthly_energy_cost AS
+			SELECT
+				strftime('%%Y-%%m', datetime(timestamp_unix, 'unixepoch')) AS month,
+				MAX(e_in) - MIN(e_in) AS monthly_consumption,
+				ROUND((MAX(e_in) - MIN(e_in)) * %f, 2) AS monthly_cost
+			FROM energy_data
+			WHERE timestamp_unix >= strftime('%%s', 'now', 'start of month', '-11 months')
+			GROUP BY month
+			ORDER BY month DESC
+			LIMIT 12
+		`, costPerKWh),
+
+		`CREATE VIEW IF NOT EXISTS monthly_energy_cost_total AS
+		 SELECT
+			 SUM(monthly_consumption) AS total_consumption,
+			 SUM(monthly_cost) AS total_cost
+		 FROM monthly_energy_cost`,
+
+		fmt.Sprintf(`
+			CREATE VIEW IF NOT EXISTS yearly_energy_cost_current AS
+			SELECT
+				SUM(monthly_consumption) AS total_consumption,
+				ROUND(SUM(monthly_cost), 2) AS total_cost
+			FROM (
+				SELECT
+					strftime('%%Y-%%m', datetime(timestamp_unix, 'unixepoch')) AS month,
+					MAX(e_in) - MIN(e_in) AS monthly_consumption,
+					(MAX(e_in) - MIN(e_in)) * %f AS monthly_cost
+				FROM energy_data
+				WHERE substr(strftime('%%Y-%%m', datetime(timestamp_unix, 'unixepoch')), 1, 4) = strftime('%%Y', 'now')
+				GROUP BY month
+			)
+		`, costPerKWh),
+	}
+
+	for _, v := range views {
+		if _, err := db.Exec(v); err != nil {
+			return fmt.Errorf("Fehler beim Erstellen von View: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// ---------------- DB Aggregation ----------------
+
+func startDBAggregation(db *sql.DB, hour, minute int, costPerKWh float64) {
 	_, _ = db.Exec("PRAGMA wal_autocheckpoint=1000;")
 
-	// Channel für manuelle Trigger (USR1)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGUSR1)
 
-	// Aggregationsfunktion
 	runAggregation := func() {
 		log.Println("Starte DB-Aggregation...")
 
@@ -117,10 +174,9 @@ func startDBAggregation(db *sql.DB, hour, minute int) {
 			}
 
 			insert := fmt.Sprintf(`
-
 				INSERT INTO %s (timestamp_unix, timestamp_rfc3339, %s, %s)
 				SELECT timestamp_unix, timestamp_rfc3339, %s, %s FROM %s
-			`, table, strings.ReplaceAll(otherCols, ",", ", "), valueColumn, otherCols, valueColumn, tmpTable)
+			`, table, strings.ReplaceAll(otherCols, ",", ", "), valueColumn, valueColumn, otherCols, tmpTable)
 
 			if _, err := db.Exec(insert); err != nil {
 				log.Printf("Fehler beim Einfügen aggregierter Daten in %s: %v", table, err)
@@ -131,14 +187,12 @@ func startDBAggregation(db *sql.DB, hour, minute int) {
 			log.Printf("Aggregation in %s abgeschlossen", table)
 		}
 
-		// Tabellen aggregieren
 		aggregate("energy_data", "power", "e_in, e_out")
 		aggregate("tasmota_data", "power", "device_id")
 		aggregate("solar_data", "value", "device_id, channel, metric")
 
 		// WAL-Checkpoint
 		if _, err := db.Exec("PRAGMA wal_checkpoint(FULL);"); err != nil {
-
 			log.Printf("Fehler beim WAL-Checkpoint: %v", err)
 		} else {
 			log.Println("WAL-Checkpoint durchgeführt – WAL-Datei geleert")
@@ -150,9 +204,15 @@ func startDBAggregation(db *sql.DB, hour, minute int) {
 		} else {
 			log.Println("VACUUM abgeschlossen – DB verschlankt")
 		}
+
+		// Views nach Aggregation aktualisieren
+		if err := createViews(db, costPerKWh); err != nil {
+			log.Printf("Fehler beim Aktualisieren der Views: %v", err)
+		} else {
+			log.Println("Views aktualisiert")
+		}
 	}
 
-	// Nachtjob
 	go func() {
 		for {
 			now := time.Now()
@@ -165,7 +225,6 @@ func startDBAggregation(db *sql.DB, hour, minute int) {
 		}
 	}()
 
-	// Manueller Trigger per Signal
 	go func() {
 		for range sigChan {
 			log.Println("Signal USR1 empfangen – Aggregation wird gestartet...")
@@ -173,6 +232,82 @@ func startDBAggregation(db *sql.DB, hour, minute int) {
 		}
 	}()
 }
+
+// ---------------- Solar Handler ----------------
+
+func handleSolar(topic string, payload string, db *sql.DB, config Config) {
+	loc, _ := time.LoadLocation(config.Time.Timezone)
+	now := time.Now().In(loc)
+	rfc3339Time := now.Format(time.RFC3339)
+	unixTime := now.UTC().Unix()
+	segments := strings.Split(topic, "/")
+	debug := config.Broker.SetDebug
+	if len(segments) < 2 {
+		log.Printf("Ungültiges Solar-Topic: %s", topic)
+		return
+	}
+
+	var deviceID string
+	var channel int
+	var metric string
+
+	switch segments[1] {
+	case "ac", "dc":
+		deviceID = segments[1]
+		channel = -1
+		metric = strings.Join(segments[2:], "/")
+	case "dtu":
+		return
+	case "today_energy_sum":
+		deviceID = "summary"
+		channel = -1
+		metric = "today_energy_sum"
+	default:
+		if len(segments) < 4 {
+			if debug {
+				log.Printf("Ungültiges Solar-Topic: %s", topic)
+			}
+			return
+		}
+		deviceID = segments[1]
+		ch, err := strconv.Atoi(segments[2])
+		if err != nil {
+			if debug {
+				log.Printf("Ungültiger Channel: %s", segments[2])
+			}
+			return
+		}
+		channel = ch
+		metric = strings.Join(segments[3:], "/")
+	}
+
+	if val, err := strconv.ParseFloat(payload, 64); err == nil {
+		stmt, _ := db.Prepare(`INSERT INTO solar_data (timestamp_unix, timestamp_rfc3339, device_id, channel, metric, value) VALUES (?, ?, ?, ?, ?, ?)`)
+		defer stmt.Close()
+		_, err = stmt.Exec(unixTime, rfc3339Time, deviceID, channel, metric, val)
+		if err != nil {
+			log.Printf("Fehler DB solar_data: %v", err)
+		} else if debug {
+			log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
+		}
+		return
+	}
+
+	stmt, _ := db.Prepare(`
+		INSERT INTO solar_meta (device_id, channel, key, value)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(device_id, channel, key) DO UPDATE SET value = excluded.value
+	`)
+	defer stmt.Close()
+	_, err := stmt.Exec(deviceID, channel, metric, payload)
+	if err != nil {
+		log.Printf("Fehler DB solar_meta: %v", err)
+	} else if debug {
+		log.Printf("Solar-Meta gespeichert: %s/%d/%s = %s", deviceID, channel, metric, payload)
+	}
+}
+
+// ---------------- Main ----------------
 
 func main() {
 	var config Config
@@ -191,33 +326,24 @@ func main() {
 
 	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
 
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS energy_data (
+	// Tabellen erstellen
+	tables := []string{
+		`CREATE TABLE IF NOT EXISTS energy_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
 			e_in REAL,
 			e_out REAL,
 			power INTEGER
-		)`)
-	if err != nil {
-		log.Fatalf("Fehler beim Erstellen der Tabelle energy_data: %v", err)
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS tasmota_data (
+		)`,
+		`CREATE TABLE IF NOT EXISTS tasmota_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			device_id TEXT,
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
 			power INTEGER
-		)`)
-	if err != nil {
-		log.Fatalf("Fehler beim Erstellen der Tabelle tasmota_data: %v", err)
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS solar_data (
+		)`,
+		`CREATE TABLE IF NOT EXISTS solar_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp_unix INTEGER,
 			timestamp_rfc3339 TEXT,
@@ -225,34 +351,40 @@ func main() {
 			channel INTEGER,
 			metric TEXT,
 			value REAL
-		)`)
-	if err != nil {
-		log.Fatalf("Fehler beim Erstellen der Tabelle solar_data: %v", err)
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS solar_meta (
+		)`,
+		`CREATE TABLE IF NOT EXISTS solar_meta (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			device_id TEXT,
 			channel INTEGER,
 			key TEXT,
 			value TEXT,
 			UNIQUE(device_id, channel, key)
-		)`)
-	if err != nil {
-		log.Fatalf("Fehler beim Erstellen der Tabelle solar_meta: %v", err)
+		)`,
 	}
 
+	for _, t := range tables {
+		if _, err := db.Exec(t); err != nil {
+			log.Fatalf("Fehler beim Erstellen der Tabelle: %v", err)
+		}
+	}
+
+	// Views erstellen
+	if err := createViews(db, config.Cost.PerKWh); err != nil {
+		log.Fatalf("Fehler beim Erstellen der Views: %v", err)
+	}
+
+	// Aggregation starten (täglich 03:00 Uhr)
+	startDBAggregation(db, 3, 0, config.Cost.PerKWh)
+
+	// Prepare Statements
 	stmtWatt, _ := db.Prepare(`INSERT INTO energy_data (timestamp_unix, timestamp_rfc3339, e_in, e_out, power) VALUES (?, ?, ?, ?, ?)`)
 	defer stmtWatt.Close()
 	stmtTasmota, _ := db.Prepare(`INSERT INTO tasmota_data (device_id, timestamp_unix, timestamp_rfc3339, power) VALUES (?, ?, ?, ?)`)
 	defer stmtTasmota.Close()
 
-	startDBAggregation(db, 3, 0) // Täglich um 03:00 Uhr
-
+	// --- MQTT Setup ---
 	opts := mqtt.NewClientOptions().AddBroker(config.Broker.Host)
 	opts.SetUsername(config.Broker.Username)
-
 	opts.SetPassword(config.Broker.Password)
 	opts.SetClientID(config.Broker.ClientID)
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
@@ -307,7 +439,6 @@ func main() {
 				return
 			}
 			_, err = stmtWatt.Exec(unixTime, rfc3339Time, sm.E320.E_in, sm.E320.E_out, sm.E320.Power)
-
 			if err != nil {
 				log.Printf("Fehler DB Wattwächter: %v", err)
 			}
@@ -324,7 +455,6 @@ func main() {
 				}
 				segments := strings.Split(topic, "/")
 				deviceID := ""
-
 				if len(segments) >= 2 {
 					deviceID = segments[1]
 				}
@@ -339,17 +469,13 @@ func main() {
 		}
 	}
 
+	// Subscribe Topics
 	client.Subscribe(config.Topics.Wattwaechter, config.Broker.Qos, handleMessage)
-	log.Printf("Abonniert auf Topic: %s", config.Topics.Wattwaechter)
-
 	if config.Features.TasmotaPowerEnabled {
 		client.Subscribe(config.Topics.Tasmota, config.Broker.Qos, handleMessage)
-		log.Printf("Abonniert auf Topic: %s", config.Topics.Tasmota)
 	}
-
 	if config.Features.SolarEnabled {
 		client.Subscribe("solar/#", config.Broker.Qos, handleMessage)
-		log.Printf("Abonniert auf Topic: solar/#")
 	}
 
 	log.Println("Läuft... (Strg+C zum Beenden)")
@@ -359,84 +485,4 @@ func main() {
 
 	client.Disconnect(250)
 	log.Println("Beendet.")
-}
-
-func handleSolar(topic string, payload string, db *sql.DB, config Config) {
-	loc, _ := time.LoadLocation(config.Time.Timezone)
-	now := time.Now().In(loc)
-	rfc3339Time := now.Format(time.RFC3339)
-	unixTime := now.UTC().Unix()
-	segments := strings.Split(topic, "/")
-	debug := config.Broker.SetDebug
-	if len(segments) < 2 {
-		log.Printf("Ungültiges Solar-Topic: %s", topic)
-		return
-	}
-
-	var deviceID string
-	var channel int
-	var metric string
-
-	switch segments[1] {
-	case "ac", "dc":
-		deviceID = segments[1]
-		channel = -1
-		metric = strings.Join(segments[2:], "/")
-	case "dtu":
-		return
-	case "today_energy_sum":
-		deviceID = "summary"
-		channel = -1
-		metric = "today_energy_sum"
-	default:
-		if len(segments) < 4 {
-			if debug {
-				log.Printf("Ungültiges Solar-Topic: %s", topic)
-			}
-			return
-		}
-		deviceID = segments[1]
-		ch, err := strconv.Atoi(segments[2])
-		if err != nil {
-			if debug {
-				log.Printf("Ungültiger Channel: %s", segments[2])
-			}
-			return
-		}
-		channel = ch
-		metric = strings.Join(segments[3:], "/")
-	}
-
-	// Versuche Wert als float
-	if val, err := strconv.ParseFloat(payload, 64); err == nil {
-		stmt, _ := db.Prepare(`INSERT INTO solar_data (timestamp_unix, timestamp_rfc3339, device_id, channel, metric, value) VALUES (?, ?, ?, ?, ?, ?)`)
-		defer stmt.Close()
-		_, err = stmt.Exec(unixTime, rfc3339Time, deviceID, channel, metric, val)
-		if err != nil {
-			log.Printf("Fehler DB solar_data: %v", err)
-
-		} else {
-			if debug {
-				log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
-			}
-		}
-		return
-	}
-
-	// Andernfalls Textwert → speichere in solar_meta
-	stmt, _ := db.Prepare(`
-		INSERT INTO solar_meta (device_id, channel, key, value)
-		VALUES (?, ?, ?, ?)
-
-		ON CONFLICT(device_id, channel, key) DO UPDATE SET value = excluded.value
-	`)
-	defer stmt.Close()
-	_, err := stmt.Exec(deviceID, channel, metric, payload)
-	if err != nil {
-		log.Printf("Fehler DB solar_meta: %v", err)
-	} else {
-		if debug {
-			log.Printf("Solar-Meta gespeichert: %s/%d/%s = %s", deviceID, channel, metric, payload)
-		}
-	}
 }

@@ -18,5 +18,9 @@ clean:
 restart:
 	systemctl --user restart mqttlogger
 
+help:
+	echo "all, linux-amd64, linux-arm64, clean, restart"
+	echo "all includes linux-arm64 and restart"
+
 .PHONY: all clean linux-amd64 linux-arm64 restart
 
