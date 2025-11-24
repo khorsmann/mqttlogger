@@ -390,14 +390,17 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 		metric = "today_energy_sum"
 	default:
 		if len(segments) < 4 {
-			log.Printf("Ungültiges Solar-Topic: %s", topic)
+			if debug {
+				log.Printf("Ungültiges Solar-Topic: %s", topic)
+			}
 			return
 		}
 		deviceID = segments[1]
 		ch, err := strconv.Atoi(segments[2])
 		if err != nil {
-			log.Printf("Ungültiger Channel: %s", segments[2])
-
+			if debug {
+				log.Printf("Ungültiger Channel: %s", segments[2])
+			}
 			return
 		}
 		channel = ch
