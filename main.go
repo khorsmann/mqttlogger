@@ -25,6 +25,7 @@ type BrokerConfig struct {
 	Password string `toml:"password"`
 	ClientID string `toml:"client_id"`
 	Qos      byte   `toml:"qos"`
+	SetDebug bool   `toml:"debug"`
 }
 
 type Config struct {
@@ -261,6 +262,7 @@ func main() {
 		log.Println("Erneut mit MQTT-Broker verbunden.")
 	}
 
+	debug := config.Broker.SetDebug
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("Fehler beim MQTT-Connect: %v", token.Error())
@@ -309,7 +311,9 @@ func main() {
 			if err != nil {
 				log.Printf("Fehler DB Wattwächter: %v", err)
 			}
-			log.Printf("Wattwächter: %d W @ %s", sm.E320.Power, rfc3339Time)
+			if debug {
+				log.Printf("Wattwächter: %d W @ %s", sm.E320.Power, rfc3339Time)
+			}
 
 		case config.Topics.Tasmota:
 			if config.Features.TasmotaPowerEnabled {
@@ -328,7 +332,9 @@ func main() {
 				if err != nil {
 					log.Printf("Fehler DB Tasmota: %v", err)
 				}
-				log.Printf("Tasmota: %s %d W @ %s", deviceID, tm.ENERGY.Power, rfc3339Time)
+				if debug {
+					log.Printf("Tasmota: %s %d W @ %s", deviceID, tm.ENERGY.Power, rfc3339Time)
+				}
 			}
 		}
 	}
@@ -360,8 +366,8 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 	now := time.Now().In(loc)
 	rfc3339Time := now.Format(time.RFC3339)
 	unixTime := now.UTC().Unix()
-
 	segments := strings.Split(topic, "/")
+	debug := config.Broker.SetDebug
 	if len(segments) < 2 {
 		log.Printf("Ungültiges Solar-Topic: %s", topic)
 		return
@@ -407,7 +413,9 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 			log.Printf("Fehler DB solar_data: %v", err)
 
 		} else {
-			log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
+			if debug {
+				log.Printf("Solar: %s/%d/%s = %f @ %s", deviceID, channel, metric, val, rfc3339Time)
+			}
 		}
 		return
 	}
@@ -424,6 +432,8 @@ func handleSolar(topic string, payload string, db *sql.DB, config Config) {
 	if err != nil {
 		log.Printf("Fehler DB solar_meta: %v", err)
 	} else {
-		log.Printf("Solar-Meta gespeichert: %s/%d/%s = %s", deviceID, channel, metric, payload)
+		if debug {
+			log.Printf("Solar-Meta gespeichert: %s/%d/%s = %s", deviceID, channel, metric, payload)
+		}
 	}
 }

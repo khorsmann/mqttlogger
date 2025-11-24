@@ -8,6 +8,7 @@ username = "DEIN_USERNAME"
 password = "DEIN_PASSWORT"
 qos = 1
 client_id = "go-mqtt-sqlite"
+debug = false
 
 [database]
 path = "./energy.db"
