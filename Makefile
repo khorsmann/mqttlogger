@@ -29,15 +29,15 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 restart:
-	@if systemctl --user status $(APP_NAME).service >/dev/null 2>&1; then \
-		systemctl --user daemon-reload ; \
+	@if systemctl --user list-unit-files | grep -q "$(APP_NAME).service"; then \
+		systemctl --user daemon-reload; \
 		systemctl --user restart $(APP_NAME).service; \
 	else \
 		echo "User-Service $(APP_NAME).service existiert nicht."; \
 	fi
 
 status:
-	@if systemctl --user status $(APP_NAME).service >/dev/null 2>&1; then \
+	@if systemctl --user list-unit-files | grep -q "$(APP_NAME).service"; then \
 		systemctl --user status $(APP_NAME).service; \
 	else \
 		echo "User-Service $(APP_NAME).service existiert nicht."; \
