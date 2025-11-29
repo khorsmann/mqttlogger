@@ -4,13 +4,14 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/khorsmann/mqttlogger/internal/config"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Open öffnet die SQLite-Datenbank und setzt journal_mode auf WAL
+// Open öffnet die SQLite DB
 func Open(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -20,20 +21,16 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// InitDB erstellt Tabellen, Views und startet Aggregation
+// InitDB erstellt Tabellen und startet Aggregation
 func InitDB(db *sql.DB, cfg config.Config) error {
 	if err := createTables(db); err != nil {
 		return err
 	}
-	if err := createViews(db, cfg.Cost.PerKWh); err != nil {
-		return err
-	}
-	startAggregation(db, cfg)
+	startAggregationLoop(db, cfg)
 	return nil
 }
 
-// ---------------- Tabellen & Views ----------------
-
+// Tabellen erstellen
 func createTables(db *sql.DB) error {
 	tables := []string{
 		`CREATE TABLE IF NOT EXISTS energy_data (
@@ -68,6 +65,25 @@ func createTables(db *sql.DB) error {
 			value TEXT,
 			UNIQUE(device_id, channel, key)
 		);`,
+		// Persistente Aggregationen
+		`CREATE TABLE IF NOT EXISTS daily_energy (
+			day TEXT PRIMARY KEY,
+			daily_consumption REAL
+		);`,
+		`CREATE TABLE IF NOT EXISTS weekly_energy (
+			week TEXT PRIMARY KEY,
+			weekly_consumption REAL
+		);`,
+		`CREATE TABLE IF NOT EXISTS monthly_energy_cost (
+			month TEXT PRIMARY KEY,
+			monthly_consumption REAL,
+			monthly_cost REAL
+		);`,
+		`CREATE TABLE IF NOT EXISTS yearly_energy_cost_current (
+			year INTEGER PRIMARY KEY,
+			total_consumption REAL,
+			total_cost REAL
+		);`,
 	}
 
 	for _, t := range tables {
@@ -78,34 +94,82 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
-func createViews(db *sql.DB, costPerKWh float64) error {
-	views := []string{
-		fmt.Sprintf(`CREATE VIEW IF NOT EXISTS energy_cost AS
-			SELECT timestamp_unix, timestamp_rfc3339, e_in, e_out,
-			(e_in - e_out) * %.4f AS cost
-			FROM energy_data;`, costPerKWh),
-	}
+// Aggregationsfunktionen
+func aggregateDaily(db *sql.DB) error {
+	query := `
+	INSERT OR REPLACE INTO daily_energy (day, daily_consumption)
+	SELECT
+		strftime('%Y-%m-%d', datetime(timestamp_unix, 'unixepoch')) AS day,
+		MAX(e_in) - MIN(e_in) AS daily_consumption
+	FROM energy_data
+	GROUP BY day;
+	`
+	_, err := db.Exec(query)
+	return err
+}
 
-	for _, v := range views {
-		if _, err := db.Exec(v); err != nil {
-			return fmt.Errorf("Fehler beim Erstellen der View: %w", err)
+func aggregateWeekly(db *sql.DB) error {
+	query := `
+	INSERT OR REPLACE INTO weekly_energy (week, weekly_consumption)
+	SELECT
+		strftime('%Y-%W', datetime(timestamp_unix, 'unixepoch')) AS week,
+		MAX(e_in) - MIN(e_in) AS weekly_consumption
+	FROM energy_data
+	GROUP BY week;
+	`
+	_, err := db.Exec(query)
+	return err
+}
+
+func aggregateMonthly(db *sql.DB, perKWh float64) error {
+	query := `
+	INSERT OR REPLACE INTO monthly_energy_cost (month, monthly_consumption, monthly_cost)
+	SELECT
+		strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch')) AS month,
+		MAX(e_in) - MIN(e_in) AS monthly_consumption,
+		(MAX(e_in) - MIN(e_in)) * ? AS monthly_cost
+	FROM energy_data
+	GROUP BY month;
+	`
+	_, err := db.Exec(query, perKWh)
+	return err
+}
+
+func aggregateYearly(db *sql.DB, perKWh float64) error {
+	query := `
+	INSERT OR REPLACE INTO yearly_energy_cost_current (year, total_consumption, total_cost)
+	SELECT
+		strftime('%Y', datetime(timestamp_unix, 'unixepoch')) AS year,
+		MAX(e_in) - MIN(e_in) AS total_consumption,
+		(MAX(e_in) - MIN(e_in)) * ? AS total_cost
+	FROM energy_data
+	GROUP BY year;
+	`
+	_, err := db.Exec(query, perKWh)
+	return err
+}
+
+// Startet eine Hintergrund-Goroutine, die Aggregationen regelmäßig ausführt
+func startAggregationLoop(db *sql.DB, cfg config.Config) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			if err := aggregateDaily(db); err != nil {
+				log.Printf("Fehler tägliche Aggregation: %v", err)
+			}
+			if err := aggregateWeekly(db); err != nil {
+				log.Printf("Fehler wöchentliche Aggregation: %v", err)
+			}
+			if err := aggregateMonthly(db, cfg.Cost.PerKWh); err != nil {
+				log.Printf("Fehler monatliche Aggregation: %v", err)
+			}
+			if err := aggregateYearly(db, cfg.Cost.PerKWh); err != nil {
+				log.Printf("Fehler jährliche Aggregation: %v", err)
+			}
+
+			<-ticker.C
 		}
-	}
-	return nil
+	}()
 }
-
-// ---------------- Aggregation ----------------
-
-func startAggregation(db *sql.DB, cfg config.Config) {
-	log.Println("Aggregation gestartet (hier können deine Stunden-/Tages-/Monats-Aggregationen eingebaut werden)")
-	// Beispiel: In Zukunft könntest du hier aggregateHourly/Daily/Monthly starten
-}
-
-// ---------------- Hilfsfunktionen ----------------
-
-// Diese Funktionen könntest du z.B. für echte Aggregationen implementieren
-/*
-func aggregateHourly(db *sql.DB) { ... }
-func aggregateDaily(db *sql.DB) { ... }
-func aggregateMonthly(db *sql.DB) { ... }
-*/
