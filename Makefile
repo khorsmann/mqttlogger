@@ -11,7 +11,7 @@ build:
 
 current: build
 	@echo "Building for current architecture ($(GOOS)/$(GOARCH))..."
-	go build -o $(BUILD_DIR)/$(APP_NAME) -ldflags "$(LDFLAGS)" ./cmd/mqttlogger/
+	go build -o $(BUILD_DIR)/$(APP_NAME) -ldflags "$(LDFLAGS)" $(MAIN)
 
 linux-amd64: build
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=$(CGO) CC=x86_64-linux-gnu-gcc \

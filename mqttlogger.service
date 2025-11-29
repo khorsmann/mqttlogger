@@ -2,7 +2,7 @@
 Description=MQTT Logger Service
 
 [Service]
-ExecStart=/home/pi/git/mqttlogger/build/mqttlogger-linux-arm64
+ExecStart=/home/pi/git/mqttlogger/build/mqttlogger
 SyslogIdentifier=mqttlogger
 WorkingDirectory=/home/pi/git/mqttlogger
 Restart=always
