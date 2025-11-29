@@ -22,14 +22,14 @@ func main() {
 	}
 	defer database.Close()
 
-	// Tabellen & Views erstellen
+	// Tabellen & Aggregationen initialisieren
 	if err := db.InitDB(database, cfg); err != nil {
 		log.Fatalf("Fehler beim Initialisieren der DB: %v", err)
 	}
 
 	// MQTT starten
-	_ = mqtt.StartClient(cfg, database)
+	mqtt.StartClient(cfg, database)
 
-	// Endlosschleife (MQTT + Aggregation laufen in Hintergrund-Goroutines)
+	// Endlosschleife, alles läuft in Hintergrund-Goroutines
 	select {}
 }
