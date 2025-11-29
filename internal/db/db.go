@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/khorsmann/mqttlogger/internal/config"
-
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -21,18 +20,25 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// InitDB erstellt Tabellen und startet Aggregation
+// InitDB erstellt Tabellen + Views und startet Aggregation
 func InitDB(db *sql.DB, cfg config.Config) error {
 	if err := createTables(db); err != nil {
+		return err
+	}
+	if err := createViews(db); err != nil {
 		return err
 	}
 	startAggregationLoop(db, cfg)
 	return nil
 }
 
-// Tabellen erstellen
+// -------------------------------------------------------------------
+// Tabellen erstellen (RAW-TABELLEN - NICHT VIEWS ÜBERSCHREIBEN!)
+// -------------------------------------------------------------------
+
 func createTables(db *sql.DB) error {
 	tables := []string{
+		// Original-Daten
 		`CREATE TABLE IF NOT EXISTS energy_data (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp_unix INTEGER,
@@ -65,24 +71,25 @@ func createTables(db *sql.DB) error {
 			value TEXT,
 			UNIQUE(device_id, channel, key)
 		);`,
-		// Persistente Aggregationen
-		`CREATE TABLE IF NOT EXISTS daily_energy (
+
+		// Persistente RAW-Aggregationen
+		`CREATE TABLE IF NOT EXISTS daily_energy_raw (
 			day TEXT PRIMARY KEY,
 			daily_consumption REAL
 		);`,
-		`CREATE TABLE IF NOT EXISTS weekly_energy (
+		`CREATE TABLE IF NOT EXISTS weekly_energy_raw (
 			week TEXT PRIMARY KEY,
 			weekly_consumption REAL
 		);`,
-		`CREATE TABLE IF NOT EXISTS monthly_energy_cost (
+		`CREATE TABLE IF NOT EXISTS monthly_energy_cost_raw (
 			month TEXT PRIMARY KEY,
-			monthly_consumption REAL,
-			monthly_cost REAL
+			consumption REAL,
+			cost REAL
 		);`,
-		`CREATE TABLE IF NOT EXISTS yearly_energy_cost_current (
+		`CREATE TABLE IF NOT EXISTS yearly_energy_cost_current_raw (
 			year INTEGER PRIMARY KEY,
-			total_consumption REAL,
-			total_cost REAL
+			consumption REAL,
+			cost REAL
 		);`,
 	}
 
@@ -94,13 +101,54 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
-// Aggregationsfunktionen
+// -------------------------------------------------------------------
+// Views erzeugen (werden von Grafana verwendet → NICHT ÄNDERN!)
+// -------------------------------------------------------------------
+
+func createViews(db *sql.DB) error {
+
+	views := []string{
+
+		// View: täglicher Verbrauch
+		`CREATE VIEW IF NOT EXISTS daily_energy AS
+			SELECT day, daily_consumption
+			FROM daily_energy_raw;`,
+
+		// View: Wöchentlicher Verbrauch
+		`CREATE VIEW IF NOT EXISTS weekly_energy AS
+			SELECT week, weekly_consumption
+			FROM weekly_energy_raw;`,
+
+		// View: Monatsverbrauch & Kosten
+		`CREATE VIEW IF NOT EXISTS monthly_energy_cost AS
+			SELECT month, consumption AS monthly_consumption, cost AS monthly_cost
+			FROM monthly_energy_cost_raw;`,
+
+		// View: aktuelles Jahr Total
+		`CREATE VIEW IF NOT EXISTS yearly_energy_cost_current AS
+			SELECT year, consumption AS total_consumption, cost AS total_cost
+			FROM yearly_energy_cost_current_raw;`,
+	}
+
+	for _, v := range views {
+		if _, err := db.Exec(v); err != nil {
+			return fmt.Errorf("Fehler beim Erstellen der View: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// -------------------------------------------------------------------
+// Aggregationsfunktionen (schreiben in *_raw Tabellen)
+// -------------------------------------------------------------------
+
 func aggregateDaily(db *sql.DB) error {
 	query := `
-	INSERT OR REPLACE INTO daily_energy (day, daily_consumption)
+	INSERT OR REPLACE INTO daily_energy_raw (day, daily_consumption)
 	SELECT
 		strftime('%Y-%m-%d', datetime(timestamp_unix, 'unixepoch')) AS day,
-		MAX(e_in) - MIN(e_in) AS daily_consumption
+		MAX(e_in) - MIN(e_in) AS consumption
 	FROM energy_data
 	GROUP BY day;
 	`
@@ -110,10 +158,10 @@ func aggregateDaily(db *sql.DB) error {
 
 func aggregateWeekly(db *sql.DB) error {
 	query := `
-	INSERT OR REPLACE INTO weekly_energy (week, weekly_consumption)
+	INSERT OR REPLACE INTO weekly_energy_raw (week, weekly_consumption)
 	SELECT
 		strftime('%Y-%W', datetime(timestamp_unix, 'unixepoch')) AS week,
-		MAX(e_in) - MIN(e_in) AS weekly_consumption
+		MAX(e_in) - MIN(e_in)
 	FROM energy_data
 	GROUP BY week;
 	`
@@ -123,11 +171,11 @@ func aggregateWeekly(db *sql.DB) error {
 
 func aggregateMonthly(db *sql.DB, perKWh float64) error {
 	query := `
-	INSERT OR REPLACE INTO monthly_energy_cost (month, monthly_consumption, monthly_cost)
+	INSERT OR REPLACE INTO monthly_energy_cost_raw (month, consumption, cost)
 	SELECT
 		strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch')) AS month,
-		MAX(e_in) - MIN(e_in) AS monthly_consumption,
-		(MAX(e_in) - MIN(e_in)) * ? AS monthly_cost
+		MAX(e_in) - MIN(e_in) AS consumption,
+		(MAX(e_in) - MIN(e_in)) * ? AS cost
 	FROM energy_data
 	GROUP BY month;
 	`
@@ -137,11 +185,11 @@ func aggregateMonthly(db *sql.DB, perKWh float64) error {
 
 func aggregateYearly(db *sql.DB, perKWh float64) error {
 	query := `
-	INSERT OR REPLACE INTO yearly_energy_cost_current (year, total_consumption, total_cost)
+	INSERT OR REPLACE INTO yearly_energy_cost_current_raw (year, consumption, cost)
 	SELECT
 		strftime('%Y', datetime(timestamp_unix, 'unixepoch')) AS year,
-		MAX(e_in) - MIN(e_in) AS total_consumption,
-		(MAX(e_in) - MIN(e_in)) * ? AS total_cost
+		MAX(e_in) - MIN(e_in) AS consumption,
+		(MAX(e_in) - MIN(e_in)) * ? AS cost
 	FROM energy_data
 	GROUP BY year;
 	`
@@ -149,7 +197,10 @@ func aggregateYearly(db *sql.DB, perKWh float64) error {
 	return err
 }
 
-// Startet eine Hintergrund-Goroutine, die Aggregationen regelmäßig ausführt
+// -------------------------------------------------------------------
+// Loop: Alle 10 Minuten Aggregationen aktualisieren
+// -------------------------------------------------------------------
+
 func startAggregationLoop(db *sql.DB, cfg config.Config) {
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
