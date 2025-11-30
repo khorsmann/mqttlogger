@@ -1,29 +1,40 @@
 package db
 
 import (
-	"fmt"
 	"os"
+
+	"github.com/khorsmann/mqttlogger/internal/cli"
 )
 
-// RestoreBackup ersetzt die DB-Datei sicher
-func RestoreBackup(dbPath, backupPath string) error {
+func RestoreBackup(dbPath, backupPath string, verbose, debug bool) error {
 
-	// 1. WAL / SHM entfernen
-	os.Remove(dbPath + "-wal")
-	os.Remove(dbPath + "-shm")
-
-	// 2. bestehende DB löschen
-	os.Remove(dbPath)
-
-	// 3. Backup kopieren
-	if err := copyFile(backupPath, dbPath); err != nil {
-		return fmt.Errorf("restore fehlgeschlagen: %w", err)
+	if verbose {
+		cli.Info("Entferne alte WAL/SHM Dateien…")
 	}
 
-	// 4. WAL wieder aktivieren
+	os.Remove(dbPath + "-wal")
+	os.Remove(dbPath + "-shm")
+	os.Remove(dbPath)
+
+	for i := 0; i <= 100; i += 5 {
+		cli.ProgressBar(i)
+	}
+
+	if verbose {
+		cli.Info("Kopiere neue DB…")
+	}
+
+	if err := copyFile(backupPath, dbPath); err != nil {
+		return err
+	}
+
+	if verbose {
+		cli.Info("Reaktiviere WAL-Modus…")
+	}
+
 	db, err := Open(dbPath)
 	if err != nil {
-		return fmt.Errorf("fehler beim reopen: %w", err)
+		return err
 	}
 	defer db.Close()
 
