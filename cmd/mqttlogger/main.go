@@ -14,8 +14,8 @@ import (
 func printHelp() {
 	cli.Bold("MQTTLOGGER – Befehle:")
 	fmt.Print(`
-  mqttlogger backup <file>    - erstellt ein Backup
-  mqttlogger restore <file>   - stellt eine DB wieder her
+  mqttlogger backup <backup-filename>    - erstellt ein Backup
+  mqttlogger restore <backup-filename>   - stellt eine DB wieder her
   --verbose                   - zeigt Details während der Ausführung
   --debug                     - SQL-Kommandos anzeigen
   --help                      - diese Hilfe
