@@ -110,24 +110,31 @@ func createViews(db *sql.DB) error {
 	views := []string{
 
 		// View: täglicher Verbrauch
-		`CREATE VIEW IF NOT EXISTS daily_energy AS
+		`DROP VIEW IF EXISTS daily_energy;
+		CREATE VIEW IF NOT EXISTS daily_energy AS
 			SELECT day, daily_consumption
 			FROM daily_energy_raw;`,
 
 		// View: Wöchentlicher Verbrauch
-		`CREATE VIEW IF NOT EXISTS weekly_energy AS
+		`DROP VIEW IF EXISTS weekly_energy;
+		CREATE VIEW IF NOT EXISTS weekly_energy AS
 			SELECT week, weekly_consumption
 			FROM weekly_energy_raw;`,
 
 		// View: Monatsverbrauch & Kosten
-		`CREATE VIEW IF NOT EXISTS monthly_energy_cost AS
+		`DROP VIEW IF EXISTS monthly_energy_cost;
+		CREATE VIEW IF NOT EXISTS monthly_energy_cost AS
 			SELECT month, consumption AS monthly_consumption, cost AS monthly_cost
 			FROM monthly_energy_cost_raw;`,
 
 		// View: aktuelles Jahr Total
-		`CREATE VIEW IF NOT EXISTS yearly_energy_cost_current AS
-			SELECT year, consumption AS total_consumption, cost AS total_cost
-			FROM yearly_energy_cost_current_raw;`,
+		`DROP VIEW IF EXISTS yearly_energy_cost_current;
+		CREATE VIEW yearly_energy_cost_current AS
+		SELECT
+			consumption AS total_consumption,
+    		cost AS total_cost
+		FROM yearly_energy_cost_current_raw
+		WHERE year = strftime('%Y','now');`,
 	}
 
 	for _, v := range views {
