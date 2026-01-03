@@ -149,16 +149,17 @@ func createViews(db *sql.DB) error {
 }
 
 // -------------------------------------------------------------------
-// Aggregationsfunktionen – jetzt mit „INSERT OR IGNORE“
+// Aggregationsfunktionen – aktualisieren vorhandene Einträge per REPLACE
 // -------------------------------------------------------------------
 
 func aggregateDaily(db *sql.DB) error {
 	query := `
-	INSERT OR IGNORE INTO daily_energy_raw (day, daily_consumption)
+	INSERT OR REPLACE INTO daily_energy_raw (day, daily_consumption)
 	SELECT
 		strftime('%Y-%m-%d', datetime(timestamp_unix, 'unixepoch')) AS day,
 		MAX(e_in) - MIN(e_in) AS consumption
 	FROM energy_data
+	WHERE timestamp_unix > 0
 	GROUP BY day
 	HAVING consumption >= 0;
 	`
@@ -168,13 +169,14 @@ func aggregateDaily(db *sql.DB) error {
 
 func aggregateWeekly(db *sql.DB) error {
 	query := `
-	INSERT OR IGNORE INTO weekly_energy_raw (week, weekly_consumption)
+	INSERT OR REPLACE INTO weekly_energy_raw (week, weekly_consumption)
 	SELECT
 		strftime('%Y-%W', datetime(timestamp_unix, 'unixepoch')) AS week,
-		MAX(e_in) - MIN(e_in)
+		MAX(e_in) - MIN(e_in) AS consumption
 	FROM energy_data
+	WHERE timestamp_unix > 0
 	GROUP BY week
-	HAVING (MAX(e_in) - MIN(e_in)) >= 0;
+	HAVING consumption >= 0;
 	`
 	_, err := db.Exec(query)
 	return err
@@ -182,12 +184,13 @@ func aggregateWeekly(db *sql.DB) error {
 
 func aggregateMonthly(db *sql.DB, perKWh float64) error {
 	query := `
-	INSERT OR IGNORE INTO monthly_energy_cost_raw (month, consumption, cost)
+	INSERT OR REPLACE INTO monthly_energy_cost_raw (month, consumption, cost)
 	SELECT
 		strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch')) AS month,
 		MAX(e_in) - MIN(e_in) AS consumption,
 		(MAX(e_in) - MIN(e_in)) * ? AS cost
 	FROM energy_data
+	WHERE timestamp_unix > 0
 	GROUP BY month
 	HAVING consumption >= 0;
 	`
@@ -197,12 +200,13 @@ func aggregateMonthly(db *sql.DB, perKWh float64) error {
 
 func aggregateYearly(db *sql.DB, perKWh float64) error {
 	query := `
-	INSERT OR IGNORE INTO yearly_energy_cost_current_raw (year, consumption, cost)
+	INSERT OR REPLACE INTO yearly_energy_cost_current_raw (year, consumption, cost)
 	SELECT
 		strftime('%Y', datetime(timestamp_unix, 'unixepoch')) AS year,
 		MAX(e_in) - MIN(e_in) AS consumption,
 		(MAX(e_in) - MIN(e_in)) * ? AS cost
 	FROM energy_data
+	WHERE timestamp_unix > 0
 	GROUP BY year
 	HAVING consumption >= 0;
 	`

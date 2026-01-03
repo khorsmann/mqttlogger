@@ -1,4 +1,7 @@
+tmp/*
 misc/*
 build/*
 *.db*
+*.tgz
+*.csv
 config.toml
