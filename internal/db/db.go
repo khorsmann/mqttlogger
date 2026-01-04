@@ -183,16 +183,55 @@ func aggregateWeekly(db *sql.DB) error {
 }
 
 func aggregateMonthly(db *sql.DB, perKWh float64) error {
+	// Rebuild the monthly table from scratch so old/invalid rows (e.g. epoch 0) vanish.
+	_, _ = db.Exec(`DELETE FROM monthly_energy_cost_raw;`)
+
 	query := `
-	INSERT OR REPLACE INTO monthly_energy_cost_raw (month, consumption, cost)
+	WITH month_edges AS (
+		SELECT
+			month,
+			MAX(CASE WHEN rn_asc = 1 THEN e_in END) AS start_e_in,
+			MAX(CASE WHEN rn_desc = 1 THEN e_in END) AS end_e_in
+		FROM (
+			SELECT
+				strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch')) AS month,
+				e_in,
+				ROW_NUMBER() OVER (
+					PARTITION BY strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch'))
+					ORDER BY timestamp_unix
+				) AS rn_asc,
+				ROW_NUMBER() OVER (
+					PARTITION BY strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch'))
+					ORDER BY timestamp_unix DESC
+				) AS rn_desc
+			FROM energy_data
+			WHERE timestamp_unix > 0
+		)
+		GROUP BY month
+	),
+	with_next AS (
+		SELECT
+			month,
+			start_e_in,
+			end_e_in,
+			LEAD(start_e_in) OVER (ORDER BY month) AS next_month_start
+		FROM month_edges
+	),
+	consumption_calc AS (
+		SELECT
+			month,
+			CASE
+				WHEN next_month_start IS NOT NULL THEN next_month_start - start_e_in
+				ELSE end_e_in - start_e_in
+			END AS consumption
+		FROM with_next
+	)
+	INSERT INTO monthly_energy_cost_raw (month, consumption, cost)
 	SELECT
-		strftime('%Y-%m', datetime(timestamp_unix, 'unixepoch')) AS month,
-		MAX(e_in) - MIN(e_in) AS consumption,
-		(MAX(e_in) - MIN(e_in)) * ? AS cost
-	FROM energy_data
-	WHERE timestamp_unix > 0
-	GROUP BY month
-	HAVING consumption >= 0;
+		month,
+		CASE WHEN consumption < 0 THEN 0 ELSE consumption END AS consumption,
+		CASE WHEN consumption < 0 THEN 0 ELSE consumption END * ? AS cost
+	FROM consumption_calc;
 	`
 	_, err := db.Exec(query, perKWh)
 	return err

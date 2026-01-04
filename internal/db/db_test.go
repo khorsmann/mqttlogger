@@ -96,7 +96,7 @@ func TestAggregateIgnoresOldTimestampsAndReplacesValues(t *testing.T) {
 	})
 
 	checkTable("monthly_energy_cost_raw", "month", "consumption", map[string]float64{
-		"2025-11": 5,
+		"2025-11": 100, // consumption is measured between month boundaries
 		"2025-12": 10,
 	})
 
